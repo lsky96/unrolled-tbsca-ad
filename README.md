@@ -3,6 +3,7 @@ Code for reproducing the results of the paper "Adaptive Anomaly Detection in Net
 
 ## Requirements
 - Python 3.8+
+
 | Package | Ver. |
 | -------- | ---- |
 | NumPy | 1.24.2+ |
@@ -24,6 +25,7 @@ The script ```script_paper_results.py``` runs all experiments done in the paper.
 3) ```--parallel```: optional, splits will be run simultaneously. Only supported for CPU.
 
 Inside the script, further sub-experiments for ```synth_abl```, ```synth_comp``` and ```abil_comp``` can be activated and deactivated. Note that single simulations, of which there are multiple per EXP, may take many hours for each split.
+
 File directories (```SCENARIODIR```, ```RESULTDIR```, ```EXPORTDIR```, ```RW_ABILENE_ROUTINGTABLE_PATH```, ```RW_ABILENE_FLOW_PATH```), CPU thread limit and device (CPU/GPU) can be configured in ```config.py```. Note that the memory optimization of the code is limited - it can easily exceed 20GB for some experiments.
 
 ### Models and Algorithms
@@ -32,6 +34,7 @@ Classical algorithms:
 - ```bsca``` (from our prev. conference publication)
 - ```bsca_tens_nrlx``` (Alg. 1)
 - ```bsca_tens_rlx``` (Alg. 2)
+
 Learning-based architectures: 
 - ```BSCATensorUnrolled``` (proposed architecture, see ```script_paper_results.py``` for configuration)
 - ```BSCAUnrolled``` (from our prev. conference publication)
@@ -46,11 +49,12 @@ The results are further exported as tabular data into ```EXPORTDIR```. They are 
 - ```{RUN_NAME}_cvs{SPLIT}{ACR}_tloss.txt```: Training loss for learning-based methods for one data split over training steps.
 - ```{RUN_NAME}_cvs{SPLIT}{ACR}_tepochs.txt```: Validation AUC and average regularization parameters for learning-based methods for one data split over training epochs.
 
+```RUN_NAME``` specifies the learning-based architecture, its configuration and the data set used to train the weights.
 ```ACR``` specifies a variation of the run parameters (except model parameters), e.g., ```_lfss{SUBSAMPLING_FACTOR}``` describes the subsampling factor of the loss function, ```_tsetsz{TRAINING_SET_SIZE}``` for a reduced-size training set.
 
 ## Abilene Dataset
 The Abilene realworld dataset can be downloaded from, e.g., [https://www.cs.utexas.edu/~yzhang/research/AbileneTM/](https://www.cs.utexas.edu/~yzhang/research/AbileneTM/) (Zhang et al. 2003 - "Fast Accurate Computation of Large-Scale IP Trafﬁc Matrices from Link Loads").
-We need the routing table "A" (set RW_ABILENE_ROUTINGTABLE_PATH accordingly) and "X{NUM}.gz" (set RW_ABILENE_FLOW_PATH accordingly.)
+We need the routing table ```A``` (set RW_ABILENE_ROUTINGTABLE_PATH accordingly) and ```X{NUM}.gz``` (set RW_ABILENE_FLOW_PATH accordingly.)
 
 ## Usage
 Please cite L. Schynol and M. Pesavento, "Adaptive Anomaly Detection in Network Flows with Low-Rank Tensor Decompositions and Deep Unrolling" if you apply the provided code in you own work. If you use the implementations of the other algorithms, please cite the respective works as well.
