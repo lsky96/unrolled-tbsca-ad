@@ -24,7 +24,7 @@ The script ```script_paper_results.py``` runs all experiments done in the paper.
 3) --parallel: optional, splits will be run simultaneously. Only supported for CPU.
 
 Inside the script, further sub-experiments for synth_abl, synth_comp and abil_comp can be activated and deactivated. Note that single simulations, of which there are multiple per EXP, may take many hours for each split.
-File directories (SCENARIODIR, RESULTDIR, EXPORTDIR, RW_ABILENE_ROUTINGTABLE_PATH, RW_ABILENE_FLOW_PATH), CPU thread limit and device (CPU/GPU) can be configured in ```config.py```. Note that the memory optimization of the code is limited - it can easily exceed 20GB for some experiments.
+File directories (```SCENARIODIR```, ```RESULTDIR```, ```EXPORTDIR```, ```RW_ABILENE_ROUTINGTABLE_PATH```, ```RW_ABILENE_FLOW_PATH```), CPU thread limit and device (CPU/GPU) can be configured in ```config.py```. Note that the memory optimization of the code is limited - it can easily exceed 20GB for some experiments.
 
 ### Models and Algorithms
 Classical algorithms: bbcd (from Mardani et al.), bsca (from our prev. conference publication), bsca_tens_nrlx (Alg. 1), bsca_tens_rlx (Alg. 2)
@@ -34,11 +34,13 @@ Learning-based architectures: BSCATensorUnrolled (proposed architecture, see ```
 Synthetic data sets and processed RW data are stored in SCENARIODIR.
 Trained models and results are pickled and stored in RESULTDIR.
 The results are further exported as tabular data into EXPORTDIR. They are named as follows:
-- ```bayopt_{ALG_NAME}_cvs{INT}.txt```: Results in AUC for classical method for one data split for best iteration number or over all layers.
-- ```bayopt_{ALG_NAME}_cvs{INT}_iter.txt```: Results in AUC for classical method for one data split over all iterations.
-- ```{RUN_NAME}_cvs{SPLIT}_ON_{VALIDATION_DATA_NAME}.txt```: Results in AUC for learning-based methods for one data split over all layers.
-- ```{RUN_NAME}_cvs{SPLIT}_tloss.txt```: Training loss for learning-based methods for one data split over training steps.
-- ```{RUN_NAME}_cvs{SPLIT}_tepochs.txt```: Validation AUC and average regularization parameters for learning-based methods for one data split over training epochs.
+- ```bayopt_{ALG_NAME}_ON_{VALIDATION_DATA_NAME}_cvs{INT}.txt```: Results in AUC for classical method for one data split for best iteration number or over all layers.
+- ```bayopt_{ALG_NAME}_{VALIDATION_DATA_NAME}_cvs{INT}_iter.txt```: Results in AUC for classical method for one data split over all iterations.
+- ```{RUN_NAME}_cvs{SPLIT}{ACR}_ON_{VALIDATION_DATA_NAME}.txt```: Results in AUC for learning-based methods for one data split over all layers.
+- ```{RUN_NAME}_cvs{SPLIT}{ACR}_tloss.txt```: Training loss for learning-based methods for one data split over training steps.
+- ```{RUN_NAME}_cvs{SPLIT}{ACR}_tepochs.txt```: Validation AUC and average regularization parameters for learning-based methods for one data split over training epochs.
+
+```ACR``` specifies a variation of the run parameters (except model parameters), e.g., ```_lfss{SUBSAMPLING_FACTOR}``` describes the subsampling factor of the loss function, ```_tsetsz{TRAINING_SET_SIZE}``` for a reduced-size training set.
 
 ## Abilene Dataset
 The Abilene realworld dataset can be downloaded from, e.g., [https://www.cs.utexas.edu/~yzhang/research/AbileneTM/](https://www.cs.utexas.edu/~yzhang/research/AbileneTM/) (Zhang et al. 2003 - "Fast Accurate Computation of Large-Scale IP Trafﬁc Matrices from Link Loads").
