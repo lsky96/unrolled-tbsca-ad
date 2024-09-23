@@ -102,8 +102,8 @@ def training_general(run_name, training_data_set, validation_data_set, nn_model_
     num_val_samples = val_data["batch_size"]
 
     if batch_partition_size is not None:
-        assert batch_size % batch_partition_size["train"] == 0
-        assert num_val_samples % batch_partition_size["val"] == 0
+        assert batch_size % batch_partition_size["train"] == 0, 'Minibatch size must be divisible by batch_partition_size["train"]'
+        assert num_val_samples % batch_partition_size["val"] == 0, 'Validation set size must be divisible by batch_partition_size["val"]'
 
     if fixed_steps_per_epoch:
         num_mbatches_epoch = fixed_steps_per_epoch

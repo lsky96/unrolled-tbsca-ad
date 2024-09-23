@@ -288,7 +288,7 @@ def generate_synthetic_nw_scenarios(batch_size=1, num_timesteps=10, num_time_seg
         if scale_cfg is not None:
             if isinstance(scale_cfg, list):
                 if "het_flows" in scale_cfg:
-                    print("SCALE HETEROGENEOUS OVER FLOWS")
+                    # print("SCALE HETEROGENEOUS OVER FLOWS")
                     fscale_cfg = torch.rand(batch_size, num_flows, 1) * (scale_cfg[1] - scale_cfg[0]) + scale_cfg[0]
                 else:
                     fscale_cfg = torch.rand(batch_size, 1, 1) * (scale_cfg[1] - scale_cfg[0]) + scale_cfg[0]
@@ -342,16 +342,13 @@ def generate_synthetic_nw_scenarios(batch_size=1, num_timesteps=10, num_time_seg
     anomaly_indicator_pos = temp_rand <= A_seed / 2  # anomalies with value +1
     anomaly_indicator_neg = temp_rand >= (1 - A_seed / 2)  # anomalies with value -1
 
-    # ano_het_cfg = anomaly_distr["het"] if "het" in anomaly_distr else None
     if isinstance(anomaly_distr["amplitude"], list):
         if "het_flows" in anomaly_distr["amplitude"]:
-            print("ANOAMP HETEROGENEOUS OVER FLOWS")
             ano_amplitude = torch.rand(batch_size, num_flows, 1, dtype=FP_DTYPE) \
                             * (anomaly_distr["amplitude"][1] - anomaly_distr["amplitude"][0]) + \
                             anomaly_distr["amplitude"][
                                 0]
         elif "het_mirror_normal" in anomaly_distr["amplitude"]:
-            print("ANOAMP HETEROGENEOUS LIKE NORMAL FLOWS")
             ano_amplitude = nflow_scale * anomaly_distr["amplitude"][0]
         else:
             ano_amplitude = torch.rand(batch_size, 1, 1, dtype=FP_DTYPE) \
@@ -368,7 +365,6 @@ def generate_synthetic_nw_scenarios(batch_size=1, num_timesteps=10, num_time_seg
     """Noise Generation"""
     # noise_het_cfg = noise_distr["het"] if "het" in noise_distr else None
     if isinstance(noise_distr["variance"], list) and "het_mirror_normal" in noise_distr["variance"]:  # noise in Z
-        print("NOISEVAR HETEROGENEOUS LIKE NORMAL FLOWS")
         noise_std = nflow_scale * torch.sqrt(torch.tensor(noise_distr["variance"][0]))
         ZN = noise_std * torch.randn_like(Z)
         Z = Z + ZN
@@ -377,7 +373,6 @@ def generate_synthetic_nw_scenarios(batch_size=1, num_timesteps=10, num_time_seg
     else:  # noise in N
         if isinstance(noise_distr["variance"], list):
             if "het_edges" in noise_distr["variance"]:
-                print("NOISE HETEROGENEOUS OVER EDGES")
                 noise_var = torch.rand(batch_size, num_directed_edges, 1, dtype=FP_DTYPE) * (
                             noise_distr["variance"][1] - noise_distr["variance"][0]) + noise_distr["variance"][0]
             else:
@@ -420,7 +415,7 @@ def show_graph(G):
     pos = nx.spring_layout(G)
     nx.draw(G, pos=pos, node_size=1000, with_labels=True, width=0.3)
     plt.show(block=None)
-    print("test")
+    # print("test")
 
 
 def nw_scenario_observation(scenario_set):

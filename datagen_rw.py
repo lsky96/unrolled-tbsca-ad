@@ -63,6 +63,7 @@ def _smoothed_flow(Z):
 
 
 def abilene_dataset(rpath, fpaths, sampling_param, preprocessing=False):
+    """Preprocessing would be using Wavelets according to Kasai 2016, however, we decided against it."""
     # fpaths - list
     # sampling_param = {anomaly_distr={amplitude, prob, length}}
 

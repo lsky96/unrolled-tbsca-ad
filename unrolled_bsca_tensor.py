@@ -45,7 +45,15 @@ def _obj_cpd_relaxed_primitive(Y, R, Omega, X, U, V, W, A, lam, mu, nu, batch_me
         sw = sn / (Y.shape[-1])
     num_time_seg = W.shape[-2]
     obj = utils.frob_norm_sq(Omega * (Y - X - timeseg_mat2tensor(R @ A, num_time_seg)), dim=(-3, -2, -1)) / 2
-    obj += nu * utils.frob_norm_sq(X - tutl.cpd(U, V, W), dim=(-3, -2, -1)) / 2
+    if U.ndim > 3:
+        niter = U.shape[0] // 5
+        Xest = []
+        for Us, Vs, Ws in zip(torch.tensor_split(U, niter), torch.tensor_split(V, niter), torch.tensor_split(W, niter)):
+            Xest.append(tutl.cpd(Us, Vs, Ws))
+        Xest = torch.cat(Xest, dim=0)
+    else:
+        Xest = tutl.cpd(U, V, W)
+    obj += nu * utils.frob_norm_sq(X - Xest, dim=(-3, -2, -1)) / 2
     obj += lam * (su * utils.frob_norm_sq(U, dim=(-2, -1)) + sv * utils.frob_norm_sq(V, dim=(
     -2, -1)) + sw * utils.frob_norm_sq(W, dim=(-2, -1))) / 2
     obj += mu * utils.l1_norm(A, dim=(-2, -1))
@@ -717,9 +725,9 @@ class BSCATensorUnrolledIteration_ModeWise(nn.Module):
 
     DF_OPT_1 = "1dyn1ly"
 
-    MU_OPT_0 = "d1ly"
-    # MU_OPT_1 = "1dyn1ly"
-    # MU_OPT_2 = "1dyn1lyi"
+    MU_OPT_0 = "d1ly"  # deprecated
+    MU_OPT_1 = "1dyn1ly"  # deprecated
+    MU_OPT_2 = "1dyn1lyi"  # deprecated
 
     DF_OPT_F1 = "f1ly"
     DF_OPT_F2 = "f2ly"
@@ -788,16 +796,16 @@ class BSCATensorUnrolledIteration_ModeWise(nn.Module):
         else:
             self.datafit_nw = None
 
-        if self.MU_OPT_0 in self.mu_options:
-            self.mu_nw = RegParamMLP([32, 1], batch_norm_input=self.batch_norm)
-            mu_ffun = _mu_features_dyn
+        # if self.MU_OPT_0 in self.mu_options:
+        #     self.mu_nw = RegParamMLP([32, 1], batch_norm_input=self.batch_norm)
+        #     mu_ffun = _mu_features_dyn
         # elif self.MU_OPT_1 in self.mu_options:
         #     self.mu_nw = RegParamMLP([32, 1], batch_norm_input=self.batch_norm)
         #     mu_ffun = _mu_features_dynamic
         # elif self.MU_OPT_2 in self.mu_options:
         #     self.mu_nw = RegParamMLP([32, 1], batch_norm_input=self.batch_norm)
         #     mu_ffun = _mu_features_dynamic_i
-        elif self.MU_OPT_F1 in self.mu_options:
+        if self.MU_OPT_F1 in self.mu_options:
             self.mu_nw = RegParamMLP([13, 1], batch_norm_input=self.batch_norm, init="uniform_small")
             mu_ffun = _mu_embedding_dyn_final
         elif self.MU_OPT_F2 in self.mu_options:

@@ -204,7 +204,7 @@ def approxauc2_homotopy_fast(scenario_dict, A_est, epoch, subsampling=16, beta1=
     eps1 = torch.tensor(beta1)
     eps2 = torch.tensor(beta2)
 
-    beta = torch.clamp(torch.tensor((epoch - t1) * ((eps2 - eps1) / (t2 - t1)) + eps1),
+    beta = torch.clamp((epoch - t1) * ((eps2 - eps1) / (t2 - t1)) + eps1,
                        min=torch.tensor(eps1), max=torch.tensor(eps2))
     return _approx_auc(scenario_dict, A_est, beta, option=2, layers=[-1], subsampling=subsampling)
 

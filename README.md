@@ -16,15 +16,17 @@ Code for reproducing the results of the paper "Adaptive Anomaly Detection in Net
 ### Executing training and validation
 The script ```script_paper_results.py``` runs all experiments done in the paper. Arguments: ```EXP --cvs CVS [--parallel]```
 1) ```EXP```: There are 5 experiments that can be run:
-	- ```synth_ab```: Runs the script that was used to perform the feature distillation for parameters **W** and **M**. The distillation by model comparison is not automatic, and experiments are by progressively adding the feature group yielding the best performance and iterating through the remaining groups. The progression is indicated by the ```Round X``` comments.
+	- ```synth_abl```: Runs the script that was used to perform the feature distillation for parameters **W** and **M**. The distillation by model comparison is not automatic, and experiments are by progressively adding the feature group yielding the best performance and iterating through the remaining groups. The progression is indicated by the ```Round X``` comments.
 	- ```synth_comp```: Runs comparisons of different methods on synthetic data.
 	- ```abil_comp```: Runs comparisons of different methods on Abilene data.
-	- ```class_comp```: Runs comparisons on "classical" (not unrolled) algorithms on a synthetic data set using Bayesian optimization methods.
-	- ```custom```: Runs a training run and validation for arbitrary parameters. The experimental parameters are described and set within the script. 
+	- ```iter_comp```: Runs comparisons on "classical" iterative (not unrolled) algorithms on a synthetic data set using Bayesian optimization methods.
+	- ```custom_learn_syn```: Executes a customizable training run and validation for an unrolling-based architecture on synthetic data. The experimental parameters are described and set within the script. 
+	- ```custom_learn_rw```: Executes a customizable training run and validation for an unrolling-based architecture on realworld data. The experimental parameters are described and set within the script. Note that the Abilene flow data set is not provided here, see below.
+	- ```custom_iter```: Executes Bayesian optimization for the parameters of a classical algorithm and then validates its performance. The experimental parameters are described and set within the script. 
 2) ```--cvs CVS```: list of cross-validation split indices, e.g., 0 1 2 3 4. ```synth_abl```, ```synth_comp```, ```class_comp``` and ```custom``` (per default) have 5 splits in total (0 1 2 3 4). ```abil_comp``` has 4 splits.
 3) ```--parallel```: optional, splits will be run simultaneously. Only supported for CPU.
 
-Inside the script, further sub-experiments for ```synth_abl```, ```synth_comp``` and ```abil_comp``` can be activated and deactivated. Note that single simulations, of which there are multiple per EXP, may take many hours for each split.
+Inside the script, further sub-experiments for ```synth_abl```, ```synth_comp``` and ```abil_comp``` can be activated and deactivated. Note that single simulations, of which there are multiple per EXP, may take many hours for each split. The script does not calculate the mean and standard deviation of the results across cross validation splits.
 
 File directories (```SCENARIODIR```, ```RESULTDIR```, ```EXPORTDIR```, ```RW_ABILENE_ROUTINGTABLE_PATH```, ```RW_ABILENE_FLOW_PATH```), CPU thread limit and device (CPU/GPU) can be configured in ```config.py```. Note that the memory optimization of the code is limited - it can easily exceed 20GB for some experiments.
 
@@ -34,6 +36,7 @@ Classical algorithms:
 - ```bsca``` (from our prev. conference publication)
 - ```bsca_tens_nrlx``` (Alg. 1)
 - ```bsca_tens_rlx``` (Alg. 2)
+- ```refalg_kasai``` (reimplementation of the algorithm in Kasai et al. "Dynamic Anomalography: Tracking Network Anomalies Via Sparsity and Low Rank")
 
 Learning-based architectures: 
 - ```BSCATensorUnrolled``` (proposed architecture, see ```script_paper_results.py``` for configuration)
@@ -53,8 +56,9 @@ The results are further exported as tabular data into ```EXPORTDIR```. They are 
 ```ACR``` specifies a variation of the run parameters (except model parameters), e.g., ```_lfss{SUBSAMPLING_FACTOR}``` describes the subsampling factor of the loss function, ```_tsetsz{TRAINING_SET_SIZE}``` for a reduced-size training set.
 
 ## Abilene Dataset
-The Abilene realworld dataset can be downloaded from, e.g., [https://www.cs.utexas.edu/~yzhang/research/AbileneTM/](https://www.cs.utexas.edu/~yzhang/research/AbileneTM/) (Zhang et al. 2003 - "Fast Accurate Computation of Large-Scale IP Trafﬁc Matrices from Link Loads").
-We need the routing table ```A``` (set RW_ABILENE_ROUTINGTABLE_PATH accordingly) and ```X{NUM}.gz``` (set RW_ABILENE_FLOW_PATH accordingly.)
+The Abilene realworld dataset is not included here, see the original publication associated to this data set: Zhang et al. 2003 - "Fast Accurate Computation of Large-Scale IP Trafﬁc Matrices from Link Loads". 
+It can be downloaded from, e.g., [https://www.cs.utexas.edu/~yzhang/research/AbileneTM/](https://www.cs.utexas.edu/~yzhang/research/AbileneTM/).
+The provided code needs the routing table ```A``` (set RW_ABILENE_ROUTINGTABLE_PATH accordingly) and the flow data```X{NUM}.gz``` from ```NUM=1,...,24``` (set RW_ABILENE_FLOW_PATH accordingly.)
 
 ## Usage
 Please cite L. Schynol and M. Pesavento, "Adaptive Anomaly Detection in Network Flows with Low-Rank Tensor Decompositions and Deep Unrolling" if you apply the provided code in you own work. If you use the implementations of the other algorithms, please cite the respective works as well.

@@ -14,7 +14,9 @@ import unrolled_bsca_tensor
 
 import torch.multiprocessing as mp
 
-from config import DFILEEXT, SCENARIODIR, RESULTDIR, EXPORTDIR, RW_ABILENE_DIR, CPU_THREAD_LIMIT
+from config import DFILEEXT, SCENARIODIR, RESULTDIR, EXPORTDIR, \
+    RW_ABILENE_ROUTINGTABLE_PATH, RW_ABILENE_FLOW_PATH, CPU_THREAD_LIMIT
+from paper_results_utils import get_lam_mu_grid
 
 if not os.path.isdir(SCENARIODIR):
     os.mkdir(SCENARIODIR)
@@ -25,45 +27,386 @@ if not os.path.isdir(RESULTDIR):
 if not os.path.isdir(EXPORTDIR):
     os.mkdir(EXPORTDIR)
 
-"""CONFIGURATION: Sub-experiments"""
-"""CONFIG: synthethic_adaptfeatures_model_comp"""
+"""CONFIGURATION: Sub-experiments of paper"""
+"""CONFIG: synthethic_adaptfeatures_model_comp (synth_abl)"""
 AFMC_LAYER_SWEEP = False
 AFMC_DF_SWEEP = False  # for iteratively sweeping features for W and comparing model performance
 AFMC_MU_SWEEP = False  # for iteratively sweeping features for M and comparing model performance
 AFMC_NW_HIDLAYER_SWEEP = False  # sweeping number of hidden layers for statistical parameter representation map
 
-"""CONFIG: tensor_synthetic_comparisons"""
+"""CONFIG: tensor_synthetic_comparisons (synth_comp)"""
 SYNTH_LAYER_SWEEP = True
-SYNTH_TDATA_SIZE_SWEEP = False
+SYNTH_TDATA_SIZE_SWEEP = True
 SYNTH_GRAPH_SIZE_SWEEP = False  # sweeping over datasets with different domain sizes
-# GRAPH_SIZE_SENSITIVITY = True
 SYNTH_LOSSFUN_SS_SWEEP = False
 SYNTH_CFG_SWEEP = False  # various configurations
 SYNTH_CLASSICAL = False  # classical algorithms
 SYNTH_HANKEL_ALG = False  # Hankel-tensor-based algorithm (Kasai 2016)
 SYNTH_RUNTIME = False  # measure runtime, turns of thread limit
 
-"""CONFIG: tensor_rw_abilene_comparisons"""
+"""CONFIG: tensor_rw_abilene_comparisons (abil_comp)"""
 RW_LAYER_SWEEP = True
 RW_CLASSICAL = False  # classical algorithms
 RW_HANKEL_REFALG = False  # Hankel-tensor-based algorithm (Kasai 2016)
 
 
-def get_lam_mu_grid(min, max, resolution):
-    lam_log_space = torch.linspace(min, max, resolution)
-    mu_log_space = torch.linspace(min, max, resolution)
-    return lam_log_space, mu_log_space
+"""custom_learn_syn"""
+def custom_learning_synthetic(cvs=None):
+    """Basic script for running an experiment."""
+
+    """DATA GENERATION CONFIG"""
+    # Default config is the same as for the Tab. 7: AU-tBSCA-AUG.
+    data_set_name = "custom_data"  # change this if changing configuration, otherwise it will not be generated
+    data_path = os.path.join(SCENARIODIR, data_set_name + DFILEEXT)
+
+    num_timesteps = 300  # T
+    num_time_seg = 10  # T_2, third tensor dimension, time folding
+    graph_param = {
+        "num_nodes": 15,
+        "num_edges": 30,
+        "min_distance": 1.0,
+        # determines which connections between nodes are made, graph generation may fail if too low
+    }
+
+    sampling_param = {
+        "flow_distr": {"structure": "cpd",  # can be matrix in case of low-rank matrix structure of normal flows
+                       "rank": 70,  # rank of normal flows
+                       "scale": [0.25, 1.0, "het_flows", "het_time"]},
+        # scaling of normal flows across tensor dimension from 0.25, to 1.0; see paper: if "het_flows" in list -> s_1, if "het_time" in list -> s_2+s_3
+        "anomaly_distr": {"prob": 0.005,  # probability of anomaly
+                          "amplitude": [0.8, "het_mirror_normal"]},
+        # anomaly amplitude at 0.8; see paper: if "het_mirror_normal" in list -> application of scaling  s_1+s_2+s_3 to anomaly amplitudes (as in paper)
+        "noise_distr": {"variance": [0.04, "het_mirror_normal"]},
+        # noise variance at 0.04; see paper: if "het_mirror_normal" in list -> application of scaling  s_1+s_2+s_3 to noise (as in paper)
+        "observation_prob": 0.90,  # probability of an (j,t) being observed
+    }
+
+    scenario_param = {
+        "num_timesteps": num_timesteps,
+        "num_time_seg": num_time_seg,
+        "graph_param": graph_param,
+        "sampling_param": sampling_param}
+
+    """MODEL_PARAM"""
+    # maximum rank of low-rank decomposition
+    rank_svd = 60  # matrix decomposition
+    rank_cpd = 300  # tensor decomposition
+
+    """model architecture proposed in paper at hand"""
+    model_cls = unrolled_bsca_tensor.BSCATensorUnrolled  # model architecture class
+    model_param = {"nn_model_class": model_cls,
+                   "num_layers": 8,  # number of model layers
+                   "rank": rank_cpd,  # Max CPD rank
+                   "option": "rlx2x+nnf",
+                   # update option: "nrlx": non-augmented update, "rlx+nnf": augmented update with nonnegativity constraint, "rlx2x+nnf": "rlx+nnf" with X updates 2 times
+                   "it1_option": "nrlx",  # see above
+                   "no_tensor": False,  # reduction of model to matrix decomposition
+                   "param_nw": "modewise",
+                   # False (no adaptivity), "modewise" (Adaptivity as proposed in paper) or "modewise_sw" for partially coupled weights across layers.
+                   "datafit_options": {"f1ly": None},
+                   # must be removed if param_nw == False; adaptive W; optional key-value pair ("fmask": torch.Tensor) with size 8 mask to mask out features
+                   "mu_options": {"f1ly": None},
+                   # must be removed if param_nw == False; adaptive M; optional key-value pair ("fmask": torch.Tensor) with size 32 mask to mask out features
+                   }
+
+    """model architecture proposed in conference"""
+    # model_cls = unrolled_bsca.BSCAUnrolled
+    # model_param = {"nn_model_class": model_cls,
+    #                "num_layers": 10, "rank": rank_svd,
+    #                "param_nw": True,  # global adaptivity
+    #                }
+
+    """TRAINING PARAM"""
+    num_epochs = 500  # each epoch consists of goes through the entire data set -> num_steps = num_epochs * (train_dataset_size / batch_size)
+    batch_size = 10  # minibatch size
+    loss_type = "approxauc_homotopy_ss"  # others such as "superl2", "logistic" also implemented
+    loss_options = {"beta1": 10, "beta2": 100, "t1": 125, "t2": 275,
+                    "subsampling": 16}  # parameters of the homotopy/soft-to-hard approach, subsampling
+    opt_kw = {"lr": 0.01, "weight_decay": 0.05, "betas": [0.9, 0.95]}  # AdamW parameters
+    weight_decay = {0: 0.05, 350: 0.01}  # AdamW weight decay: starts at 0.05, switches to 0.01 after 350 epochs
+    sched_kw = {"milestones": [100, 400, 450, 480, 490], "gamma": 0.25,
+                "warmup_num_steps": 5}  # after each milestone, step size*gamma;
+
+    train_param = {"num_epochs": num_epochs, "batch_size": batch_size,
+                   "opt_kw": opt_kw, "sched_kw": sched_kw, "weight_decay": weight_decay,
+                   "loss_type": loss_type, "loss_options": loss_options}
+
+    """DATA GENERATION"""
+    if not os.path.isfile(data_path):
+        data = datagen.generate_synthetic_nw_scenarios(batch_size=500, **scenario_param)
+        torch.save(data, data_path)
+        print(f"{data_path} generated and saved.")
+    else:
+        print(f"{data_path} already exists. Generation skipped.")
+
+    """CROSSVAL SPLIT"""
+    all_idx = list(range(500))
+    cval_idx = [list(range(0, 100)),
+                list(range(100, 200)),
+                list(range(200, 300)),
+                list(range(300, 400)),
+                list(range(400, 500)), ]
+
+    default_cvs = list(range(len(cval_idx)))
+
+    if cvs is not None:
+        cvs = cvs if isinstance(cvs, list) else [cvs]
+        assert (set(cvs) <= set(default_cvs))
+    else:
+        cvs = default_cvs
+
+    """Simulations for each split"""
+    for cv in cvs:
+        val_idx = cval_idx[cv]
+        train_idx = [idx for idx in all_idx if idx not in val_idx]
+
+        roll_idx = all_idx.index(val_idx[0])
+        train_idx = np.roll(np.array(train_idx), -roll_idx).tolist()  # rolling indices such that list starts at
+        # different index each time, important when reducing data size
+
+        train_data = {"path": data_path, "idx": train_idx}
+        val_data = {"path": data_path, "idx": val_idx}
+
+        cvacr = "cv{}".format(cv)
+
+        model_name = putils.get_run_name(data_set_name, **model_param, **train_param, acronym=cvacr)
+        run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
+
+        putils.do_training(run_path, train_data, val_data, **train_param, **model_param,
+                           batch_partition_size={"train": 5, "val": 25})
+        putils.eval_model(run_path, model_cls, val_data,
+                          auc_over_layers=True, training_stats=True, roc=True, fig_out=True, batch_partition_size=25)
 
 
-def synthetic_classical_comparison(cvs=None):
+"""custom_learn_rw"""
+def custom_learning_abilene(cvs=None):
+    """Basic script for running an experiment."""
+
+    """DATA GENERATION CONFIG"""
+    num_weeks_abilene = 24
+    combine_weeks = 2
+    ano_amplitude = .5
+    # ano_amplitude = 1.0
+    obs_prob = 0.95
+    preprocessing = False  # when false, raw flows are used
+
+    data_set_name_abilene = "abilene15_cb{}_raw_mxmul{}".format(combine_weeks, ano_amplitude)
+    data_path_abilene = os.path.join(SCENARIODIR, data_set_name_abilene + DFILEEXT)
+    sampling_param = {"anomaly_distr": {"amplitude": ano_amplitude, "prob": 0.005, "len": 1},
+                      "observation_prob": obs_prob,
+                      "anomaly_mixture": "maxmul", "subsampling": 3, "combine_weeks": combine_weeks}
+
+    """MODEL_PARAM"""
+    # maximum rank of low-rank decomposition
+    rank_svd = 30  # matrix decomposition
+    rank_cpd = 420  # tensor decomposition
+
+    """model architecture proposed in paper at hand"""
+    model_cls = unrolled_bsca_tensor.BSCATensorUnrolled  # model architecture class
+    model_param = {"nn_model_class": model_cls,
+                   "num_layers": 9,  # number of model layers
+                   "rank": rank_cpd,  # Max CPD rank
+                   "option": "rlx2x+nnf",
+                   # update option: "nrlx": non-augmented update, "rlx+nnf": augmented update with nonnegativity constraint, "rlx2x+nnf": "rlx+nnf" with X updates 2 times
+                   "it1_option": "nrlx",  # see above
+                   "no_tensor": False,  # reduction of model to matrix decomposition
+                   "param_nw": "modewise",
+                   # False (no adaptivity), "modewise" (Adaptivity as proposed in paper) or "modewise_sw" for partially coupled weights across layers.
+                   "datafit_options": {"f1ly": None},
+                   # must be removed if param_nw == False; adaptive W; optional key-value pair ("fmask": torch.Tensor) with size 8 mask to mask out features
+                   "mu_options": {"f1ly": None},
+                   # must be removed if param_nw == False; adaptive M; optional key-value pair ("fmask": torch.Tensor) with size 32 mask to mask out features
+                   }
+
+    """model architecture proposed in conference"""
+    # model_cls = unrolled_bsca.BSCAUnrolled
+    # model_param = {"nn_model_class": model_cls,
+    #                "num_layers": 7, "rank": rank_svd,
+    #                "param_nw": True,  # global adaptivity
+    #                }
+
+    """TRAINING PARAM"""
+    num_epochs = 600  # since the dataset is very small, we force 40 steps per epoch
+    batch_size = 3
+    loss_type = "approxauc_homotopy_ss16"
+    loss_options = {"beta1": 10, "beta2": 100, "t1": 150, "t2": 350}
+    # opt_kw = {"lr": 0.01, "weight_decay": 0.01, "betas": [0.9, 0.95]}
+    opt_kw = {"lr": 0.005, "weight_decay": 0.05, "betas": [0.9, 0.95]}
+    sched_kw = {"milestones": [100, 500, 550, 580, 590], "gamma": 0.25, "warmup_num_steps": 5}
+    train_param = {"num_epochs": num_epochs, "batch_size": batch_size,
+                   "opt_kw": opt_kw, "sched_kw": sched_kw, "weight_decay": {0: 0.05, 450: 0.01},
+                   "loss_type": loss_type, "loss_options": loss_options}
+
+    """DATA GENERATION"""
+    if not os.path.isfile(data_path_abilene):
+        abilene_routing_path = RW_ABILENE_ROUTINGTABLE_PATH
+        abilene_flow_paths = [RW_ABILENE_FLOW_PATH.format(i) for i in
+                              range(1, num_weeks_abilene + 1)]
+
+        utils.set_rng_seed(0)
+        data_abilene = datagen_rw.abilene_dataset(abilene_routing_path, abilene_flow_paths,
+                                                  sampling_param, preprocessing=preprocessing)
+        torch.save(data_abilene, data_path_abilene)
+    else:
+        print(f"{data_path_abilene} already exists. Generation skipped.")
+
+    """CROSSVAL SPLIT"""
+    all_idx = list(range(num_weeks_abilene // combine_weeks))
+    cval_idx = [list(range(0, len(all_idx), 4)),
+                list(range(1, len(all_idx), 4)),
+                list(range(2, len(all_idx), 4)),
+                list(range(3, len(all_idx), 4)), ]
+    default_cvs = list(range(len(cval_idx)))
+
+    default_cvs = list(range(len(cval_idx)))
+
+    if cvs is not None:
+        cvs = cvs if isinstance(cvs, list) else [cvs]
+        assert (set(cvs) <= set(default_cvs))
+    else:
+        cvs = default_cvs
+
+    """Simulations for each split"""
+    for cv in cvs:
+        val_idx = cval_idx[cv]
+        train_idx = [idx for idx in all_idx if idx not in val_idx]
+
+        roll_idx = all_idx.index(val_idx[0])
+        train_idx = np.roll(np.array(train_idx), -roll_idx).tolist()  # rolling indices such that list starts at
+        # different index each time, important when reducing data size
+
+        train_data = {"path": data_path_abilene, "idx": train_idx}
+        val_data = {"path": data_path_abilene, "idx": val_idx}
+
+        cvacr = "cv{}".format(cv)
+
+        model_name = putils.get_run_name(data_set_name_abilene, **model_param, **train_param, acronym=cvacr)
+        run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
+
+        putils.do_training(run_path, train_data, val_data, **train_param, **model_param, force_num_steps_per_epoch=40)
+        putils.eval_model(run_path, model_cls, val_data,
+                          auc_over_layers=True, training_stats=True, roc=True, fig_out=True)
+
+
+"""custom_sim"""
+def custom_iterative(cvs=None):
+    """Runs custom simulation with classical algorithms, thereby optimizing algorithm parameters using Bayesian optimization."""
+
+    # Default config is the same as for the Fig. 5: tBSCA-AD-AUG.
+
+    """ALGORITHM PARAM"""
+    # maximum rank of low-rank decomposition
+    rank_svd = 30  # matrix decomposition
+    rank_cpd = 200  # tensor decomposition
+
+    ALGS = ["bsca", "bbcd", "bsca_tens_rlx_it1nrlx", "bsca_tens_nrlx", "refalg_kasai"]  # list of available algorithms
+    RANKS = [rank_svd, rank_svd, rank_cpd, rank_cpd, rank_cpd]
+
+    """CHANGE ALGORITHM HERE"""
+    alg_idx = 2  # CHANGE THIS TO PICK FROM ALGORITHM IN LIST ABOVE, note that refalg_kasai takes really long
+    alg, rank = ALGS[alg_idx], RANKS[alg_idx]
+
+    """DATA GENERATION CONFIG"""
+    # See explanation in custom_learning
+    data_set_name = "custom_data_simple"  # change this if changing configuration, otherwise it will not be generated
+    data_path = os.path.join(SCENARIODIR, data_set_name + DFILEEXT)
+
+    num_timesteps = 200
+    num_time_seg = 10
+    graph_param = {
+        "num_nodes": 10,
+        "num_edges": 15,
+        "min_distance": 1.0,
+    }
+    sampling_param = {
+        "flow_distr": {"structure": "cpd",
+                       "rank": 30,
+                       "scale": [1.0, 1.0, "het_flows", "het_time"]},
+        "anomaly_distr": {"prob": 0.005,
+                          "amplitude": [0.5, "het_mirror_normal"]},
+        "noise_distr": {"variance": [0.01, "het_mirror_normal"]},
+        "observation_prob": 0.9,
+    }
+
+    scenario_param = {
+        "num_timesteps": num_timesteps,
+        "num_time_seg": num_time_seg,
+        "graph_param": graph_param,
+        "sampling_param": sampling_param}
+
+    if not os.path.isfile(data_path):
+        data = datagen.generate_synthetic_nw_scenarios(batch_size=250, **scenario_param)
+        torch.save(data, data_path)
+        print(f"{data_path} generated and saved.")
+    else:
+        print(f"{data_path} already exists. Generation skipped.")
+
+    """REFALG KASAI BAYES SEARCH PARAM"""
+    window_length_kasai = None
+    rank_kasai = rank_cpd
+
+    if window_length_kasai is None:
+        wlk_str = "x"
+        search_space = [(-4.0, 4.0),
+                        (-8.0, -2.0),
+                        (-8.0, 0.0),
+                        (-6.0, 0.0),
+                        (2, 30)]  # large windows were tried and performed significantly worse here
+    else:
+        wlk_str = window_length_kasai
+        search_space = [(-4.0, 4.0),
+                        (-8.0, -2.0),
+                        (-8.0, 0.0),
+                        (-6.0, 0.0)]
+
+    """CROSSVAL SPLIT"""
+    all_idx = list(range(250))
+    cval_idx = [list(range(0, 50)),
+                list(range(50, 100)),
+                list(range(100, 150)),
+                list(range(150, 200)),
+                list(range(200, 250)), ]
+
+    default_cvs = list(range(len(cval_idx)))
+
+    if cvs is not None:
+        cvs = cvs if isinstance(cvs, list) else [cvs]
+        assert (set(cvs) <= set(default_cvs))
+    else:
+        cvs = default_cvs
+
+    """Simulations for each split"""
+    for cv in cvs:
+        val_idx = cval_idx[cv]
+        train_idx = [idx for idx in all_idx if idx not in val_idx]
+
+        train_path = {"path": data_path, "idx": train_idx}
+        val_path = {"path": data_path, "idx": val_idx}
+        data_set_name_cv = data_set_name + "_cv{}".format(cv)
+
+        """Classical Algorithm Parameter Optimization"""
+        if not alg == "refalg_kasai":
+            result_opt = "bayopt_{}_r{}_on_{}".format(alg, rank, data_set_name_cv)
+            putils.eval_classical_alg(train_path, val_path, result_opt, rank, num_fun_calls=400, alg=alg,
+                                      auc_over_iter=True, roc=True, fig_out=True, partition_size=25)
+        else:
+            train_idx_reduced = train_path["idx"][:25]  # training data reduced, because it takes way too long otherwise
+            train_path_reduced = {"path": train_path["path"], "idx": train_idx_reduced}
+            result_name = "refalg_kasai_r{}_w{}_ON_{}".format(rank_kasai, wlk_str, data_set_name_cv)
+            putils.eval_kasai_refalg(train_path_reduced, val_path, result_name, rank_kasai, window_length_kasai,
+                                     batch_partition_size=5, search_space=search_space, num_fun_calls=400, roc=True,
+                                     fig_out=True)
+
+
+def synthetic_iterative_comparison(cvs=None):
     if isinstance(CPU_THREAD_LIMIT, int):
         torch.set_num_threads(CPU_THREAD_LIMIT)
     data_set_name = "cpd_s"
     data_path = os.path.join(SCENARIODIR, data_set_name + DFILEEXT)
 
     if not os.path.isfile(data_path):
-        num_timesteps = 200  # was 100
-        num_time_seg = 10  # was 10
+        num_timesteps = 200
+        num_time_seg = 10
         graph_param = {
             "num_nodes": 10,
             "num_edges": 15,
@@ -79,23 +422,6 @@ def synthetic_classical_comparison(cvs=None):
             "observation_prob": 0.9,
         }
 
-        # num_timesteps = 300  # was 100
-        # num_time_seg = 10  # was 10
-        # graph_param = {
-        #     "num_nodes": 15,
-        #     "num_edges": 30,
-        #     "min_distance": 1.0,
-        # }
-        # sampling_param = {
-        #     "flow_distr": {"structure": "cpd",
-        #                    "rank": 70,
-        #
-        #                    "scale": [0.25, 1.0, "het_flows", "het_time"]},
-        #     "anomaly_distr": {"prob": 0.005,
-        #                       "amplitude": [0.8, "het_mirror_normal"]},
-        #     "noise_distr": {"variance": [0.04, "het_mirror_normal"]},
-        #     "observation_prob": 0.9,
-        # }
         scenario_param = {
             "num_timesteps": num_timesteps,
             "num_time_seg": num_time_seg,
@@ -137,8 +463,8 @@ def synthetic_classical_comparison(cvs=None):
         val_path = {"path": data_path, "idx": val_idx}
         data_set_name_cv = data_set_name + "_cv{}".format(cv)
 
-        """Grid Search"""
-        lam_log_space, mu_log_space = get_lam_mu_grid(-6, 2, 33)
+        # """Grid Search"""
+        # lam_log_space, mu_log_space = get_lam_mu_grid(-6, 2, 33)
 
         # result_name1 = "gridsearch_BSCA_100iter_r{}_on_{}".format(rank_svd, data_set_name_cv)
         # putils.gridsearch(val_path, result_name1, lam_log_space, mu_log_space, rank_svd,
@@ -149,23 +475,24 @@ def synthetic_classical_comparison(cvs=None):
         # result_name3 = "gridsearch_BBCDr_100iter_r{}_on_{}".format(rank_svd, data_set_name_cv)
         # putils.gridsearch(val_path, result_name3, lam_log_space, mu_log_space, rank_svd,
         #                   inv_layers=list(range(1, 101)), num_iter=100, init="randsc", alg="bbcd_r")
-        result_name4 = "gridsearch_BSCAtensor_nrlx_100iter_r{}_on_{}".format(rank_cpd, data_set_name_cv)
-        putils.gridsearch(val_path, result_name4, lam_log_space, mu_log_space, rank_cpd,
-                          inv_layers=[100], num_iter=100, init="randsc", alg="bsca_tens_nrlx")
+        # result_name4 = "gridsearch_BSCAtensor_nrlx_100iter_r{}_on_{}".format(rank_cpd, data_set_name_cv)
+        # putils.gridsearch(val_path, result_name4, lam_log_space, mu_log_space, rank_cpd,
+        #                   inv_layers=[100], num_iter=100, init="randsc", alg="bsca_tens_nrlx")
         # result_name5 = "gridsearch_BSCAtensor_rlx_100iter_r{}_on_{}".format(rank_cpd, data_set_name_cv)
         # putils.gridsearch(val_path, result_name5, lam_log_space, mu_log_space, rank_cpd,
         #                   inv_layers=list(range(1, 101)), num_iter=100, init="randsc", alg="bsca_tens_rlx")
 
         # putils.show_results_gridsearch(result_name1, layers_to_show=[5, 10, 100])
         # putils.show_results_gridsearch(result_name2, layers_to_show=[5, 10, 100])
-        # # putils.show_results_gridsearch(result_name3, layers_to_show=[5, 10, 100])
-        putils.show_results_gridsearch(result_name4, layers_to_show=[100])
+        # putils.show_results_gridsearch(result_name3, layers_to_show=[5, 10, 100])
+        # putils.show_results_gridsearch(result_name4, layers_to_show=[100])
         # putils.show_results_gridsearch(result_name5, layers_to_show=[5, 10, 100])
 
         """Classical Algorithm Parameter Optimization"""
         for alg, rank in zip(ALGS, RANKS):
             result_opt = "bayopt_{}_r{}_on_{}".format(alg, rank, data_set_name_cv)
-            putils.eval_classical_alg(train_path, val_path, result_opt, rank, num_fun_calls=400, alg=alg, auc_over_iter=True)
+            putils.eval_classical_alg(train_path, val_path, result_opt, rank, num_fun_calls=400, alg=alg,
+                                      auc_over_iter=True, partition_size=25)
 
         # result_opt1 = "bayopt_BSCA_r{}_on_{}".format(rank_svd, data_set_name_cv)
         # putils.eval_classical_alg(train_path, val_path, result_opt1, rank_svd, num_fun_calls=250, alg="bsca")
@@ -237,7 +564,7 @@ def synthetic_adaptfeatures_model_comp(cvs=None):
     loss_type = "approxauc_homotopy_ss16"
     loss_options = {"beta1": 10, "beta2": 100, "t1": 150, "t2": 350}
     opt_kw = {"lr": 0.01, "weight_decay": 0.01, "betas": [0.9, 0.95]}
-    sched_kw = {"milestones": [100, 500, 550, 580, 590], "gamma": 0.25, "warmup_num_steps": 5}  # warmup 20
+    sched_kw = {"milestones": [100, 500, 550, 580, 590], "gamma": 0.25, "warmup_num_steps": 5}
     train_param = {"num_epochs": num_epochs, "batch_size": batch_size,
                    "opt_kw": opt_kw, "sched_kw": sched_kw,
                    "loss_type": loss_type, "loss_options": loss_options}
@@ -271,9 +598,9 @@ def synthetic_adaptfeatures_model_comp(cvs=None):
                 model_name = putils.get_run_name(data_set_name, **param_cpd, **train_param, acronym=cvacr)
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
-                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd)
+                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd, batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
         """Set this according to the results of the sweep"""
         NUM_LAYERS_BEST = 6
@@ -281,7 +608,7 @@ def synthetic_adaptfeatures_model_comp(cvs=None):
         if AFMC_DF_SWEEP:
             num_layers = NUM_LAYERS_BEST
 
-            """DATAFIT: LOOP CONFIG (additional features)"""
+            """DATAFIT: LOOP CONFIG (additional embedding funs)"""
             ### Round 0
             # for feat in [0, 1, 2, 3, 4][::ORDER]
 
@@ -291,12 +618,11 @@ def synthetic_adaptfeatures_model_comp(cvs=None):
             ### Round 2
             for feat in [2, 4][::ORDER]:
 
-                ### Masks
+                ### Masks are multiplied with embedding tensor to select certain embeddings
                 df_fmask = torch.zeros(8, dtype=torch.float64)
                 mu_fmask = torch.zeros(32, dtype=torch.float64)
 
-
-                """DATAFIT: SET FEATURES"""
+                """DATAFIT: SET EMBEDDING FUNS"""
                 ### from Round 0
                 df_feat_name = "ftdf"
 
@@ -327,19 +653,20 @@ def synthetic_adaptfeatures_model_comp(cvs=None):
                              "option": "rlx2x+nnf", "it1_option": "nrlx",
                              "param_nw": "modewise",
                              "datafit_options": {"1dyn1ly": None, "fmask": df_fmask},
+                             # 1dyn1ly enables all possible embedding funs
                              # "mu_options": {"d1ly": None, "fmask": mu_fmask},
                              }
                 model_name = putils.get_run_name(data_set_name, **param_cpd, **train_param, acronym=acr)
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
-                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd)
+                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd, batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
         if AFMC_MU_SWEEP:
             num_layers = NUM_LAYERS_BEST
 
-            """MU: LOOP CONFIG (additional features)"""
+            """MU: LOOP CONFIG (additional embedding funs)"""
             # ### Round 0
             # for feat in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9][::ORDER]:
 
@@ -358,11 +685,11 @@ def synthetic_adaptfeatures_model_comp(cvs=None):
             ### Round 4
             for feat in [1, 2, 4, 9][::ORDER]:
 
-                ### Masks
+                ### Masks are multiplied with embedding tensor to select certain embeddings
                 df_fmask = torch.zeros(8, dtype=torch.float64)
                 mu_fmask = torch.zeros(32, dtype=torch.float64)
 
-                """MU: SET FEATURES"""
+                """MU: SET EMBEDDING FUNS"""
                 # ### from Round 0
                 mu_feat_name = "ftmu"
 
@@ -416,13 +743,15 @@ def synthetic_adaptfeatures_model_comp(cvs=None):
                              "param_nw": "modewise",
                              # "datafit_options": {"1dyn1ly": None, "fmask": df_fmask},
                              "mu_options": {"d1ly": None, "fmask": mu_fmask},
+                             # d1ly enables all possible embedding funs
                              }
                 model_name = putils.get_run_name(data_set_name, **param_cpd, **train_param, acronym=acr)
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
-                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd)
+                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd,
+                                   batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
         if AFMC_NW_HIDLAYER_SWEEP:
 
@@ -443,13 +772,13 @@ def synthetic_adaptfeatures_model_comp(cvs=None):
                 model_name = putils.get_run_name(data_set_name, **param_cpd, **train_param, acronym=acr)
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
-                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd)
+                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd,
+                                   batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
 
 def synthetic_comparisons(cvs=None):
-
     if (not SYNTH_RUNTIME) and isinstance(CPU_THREAD_LIMIT, int):
         torch.set_num_threads(CPU_THREAD_LIMIT)
 
@@ -538,8 +867,9 @@ def synthetic_comparisons(cvs=None):
         pwn_opt = "f1ly"
 
         if SYNTH_LAYER_SWEEP:
+
+            """TENSOR with features"""
             for num_layers in range(3, 10):
-                """TENSOR with features"""
                 param_cpd = {"nn_model_class": unrolled_bsca_tensor.BSCATensorUnrolled,
                              "num_layers": num_layers, "rank": rank_cpd,
                              "option": "rlx2x+nnf", "it1_option": "nrlx",
@@ -550,12 +880,13 @@ def synthetic_comparisons(cvs=None):
                 model_name = putils.get_run_name(data_set_name, **param_cpd, **train_param, acronym=cvacr)
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
-                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd)
+                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd,
+                                   batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
+            """Matrix-Factor with features"""
             for num_layers in range(3, 12):
-                """Matrix-Factor with features"""
                 param_cpd = {"nn_model_class": unrolled_bsca_tensor.BSCATensorUnrolled,
                              "num_layers": num_layers, "rank": rank_svd,
                              "option": "rlx2x+nnf", "it1_option": "nrlx",
@@ -567,11 +898,12 @@ def synthetic_comparisons(cvs=None):
                 model_name = putils.get_run_name(data_set_name, **param_cpd, **train_param, acronym=cvacr)
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
-                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd)
+                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd,
+                                   batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
-            """CAMSAP"""
+            """Conference"""
             for num_layers in range(3, 9):
                 model = unrolled_bsca.BSCAUnrolled
                 model_param = {"nn_model_class": model,
@@ -583,12 +915,12 @@ def synthetic_comparisons(cvs=None):
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
                 putils.do_training(run_path, train_data, val_data, **train_param, **model_param,
-                                   force_num_steps_per_epoch=40)
+                                   force_num_steps_per_epoch=40, batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, model, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
-            for num_layers in range(5, 11):
-                """TENSOR non-adaptive"""
+            """TENSOR non-adaptive"""
+            for num_layers in range(5, 10):
                 param_cpd = {"nn_model_class": unrolled_bsca_tensor.BSCATensorUnrolled,
                              "num_layers": num_layers, "rank": rank_cpd,
                              "option": "rlx2x+nnf", "it1_option": "nrlx",
@@ -596,9 +928,10 @@ def synthetic_comparisons(cvs=None):
                 model_name = putils.get_run_name(data_set_name, **param_cpd, **train_param, acronym=cvacr)
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
-                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd)
+                putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd,
+                                   batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
         if SYNTH_CLASSICAL:
             ALGS = ["bbcd", "bsca_tens_rlx_it1nrlx"]
@@ -607,12 +940,13 @@ def synthetic_comparisons(cvs=None):
             # RANKS = [rank_svd]
 
             """Classical Algorithm Parameter Optimization"""
-            train_idx_reduced = train_data["idx"][:100]  # otherwise, it will take way too long, this should not affect the result too much since overfitting is impossible
+            train_idx_reduced = train_data["idx"][
+                                :100]  # otherwise, it will take way too long, this should not affect the result too much since overfitting is impossible
             train_data_reduced = {"path": train_data["path"], "idx": train_idx_reduced}
             for alg, rank in zip(ALGS, RANKS):
                 result_name = "bayopt_{}_r{}_on_{}".format(alg, rank, data_set_name + "_" + cvacr)
                 putils.eval_classical_alg(train_data_reduced, val_data, result_name, rank, num_fun_calls=400, alg=alg,
-                                          auc_over_iter=False)
+                                          auc_over_iter=False, partition_size=25)
 
         if SYNTH_HANKEL_ALG:
             window_length_kasai = None
@@ -635,7 +969,8 @@ def synthetic_comparisons(cvs=None):
             result_name = "refalg_kasai_r{}_w{}_ON_{}".format(rank_kasai, wlk_str, data_set_name) \
                           + "_" + cvacr
 
-            train_idx_reduced = train_data["idx"][:25]  # otherwise, it will take way too long, this should not affect the result too much since overfitting is impossible
+            train_idx_reduced = train_data["idx"][
+                                :25]  # otherwise, it will take way too long, this should not affect the result too much since overfitting is impossible
             train_data_reduced = {"path": train_data["path"], "idx": train_idx_reduced}
             putils.eval_kasai_refalg(train_data_reduced, val_data, result_name, rank_kasai, window_length_kasai,
                                      batch_partition_size=50, search_space=search_space, num_fun_calls=400)
@@ -664,9 +999,9 @@ def synthetic_comparisons(cvs=None):
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
                 putils.do_training(run_path, train_data_reduced, val_data, **train_param, **param_cpd,
-                                   force_num_steps_per_epoch=40)
+                                   force_num_steps_per_epoch=40, batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
         if SYNTH_GRAPH_SIZE_SWEEP:
             szs = [0, 1, 2]
@@ -726,10 +1061,9 @@ def synthetic_comparisons(cvs=None):
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
                 putils.do_training(run_path, train_data_sz, val_data_sz, **train_param, **param_cpd,
-                                   batch_partition_size=({"train": 5, "val": 25} if sz == 2 else None))  # memory optimization
-                if True:  # TODO remove
-                    putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data_sz,
-                                      auc_over_layers=True, training_stats=True)
+                                   batch_partition_size={"train": 5, "val": 25})  # memory optimization
+                putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data_sz,
+                                 auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
                 """Adaptation"""
                 for sz_data in szs:
@@ -739,7 +1073,7 @@ def synthetic_comparisons(cvs=None):
                         val_data_sz = {"path": data_path_sz, "idx": val_data["idx"]}
 
                         putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data_sz,
-                                          auc_over_layers=True, training_stats=True)
+                                          auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
             # if GRAPH_SIZE_SENSITIVITY:
             #     for sz in szs:
@@ -779,13 +1113,13 @@ def synthetic_comparisons(cvs=None):
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
                 putils.do_training(run_path, train_data, val_data, **train_param_temp, **param_cpd,
-                                   force_num_steps_per_epoch=40)
+                                   force_num_steps_per_epoch=40, batch_partition_size={"train": 5, "val": 25})
                 putils.eval_model(run_path, unrolled_bsca_tensor.BSCATensorUnrolled, val_data,
-                                  auc_over_layers=True, training_stats=True)
+                                  auc_over_layers=True, training_stats=True, batch_partition_size=25)
 
         if SYNTH_CFG_SWEEP:
             for cfg in [1, 2, 6, 7, 9, 10, 11, 12, 13]:
-            # for cfg in [2, 9, 12]:
+                # for cfg in [2, 9, 12]:
                 # for cfg in [6]:
 
                 """TENSOR with features"""
@@ -807,7 +1141,8 @@ def synthetic_comparisons(cvs=None):
                 elif cfg == 2:
                     # no modewise, matriox
                     param_cpd_temp = {"nn_model_class": unrolled_bsca_tensor.BSCATensorUnrolled,
-                                      "num_layers": (num_layers_svdmw if not SYNTH_RUNTIME else num_layers_tensmw), "rank": rank_svd,
+                                      "num_layers": (num_layers_svdmw if not SYNTH_RUNTIME else num_layers_tensmw),
+                                      "rank": rank_svd,
                                       "option": "rlx2x+nnf", "it1_option": "nrlx",
                                       "no_tensor": True,
                                       }
@@ -863,7 +1198,8 @@ def synthetic_comparisons(cvs=None):
                 elif cfg == 9:
                     # modewise tensor, only for computation time
                     param_cpd_temp = {"nn_model_class": unrolled_bsca_tensor.BSCATensorUnrolled,
-                                      "num_layers": (num_layers_svdmw if not SYNTH_RUNTIME else num_layers_tensmw), "rank": rank_svd,
+                                      "num_layers": (num_layers_svdmw if not SYNTH_RUNTIME else num_layers_tensmw),
+                                      "rank": rank_svd,
                                       "option": "rlx2x+nnf", "it1_option": "nrlx",
                                       "param_nw": "modewise",
                                       "no_tensor": True,
@@ -872,8 +1208,9 @@ def synthetic_comparisons(cvs=None):
                                       }
                 elif cfg == 10:
                     param_cpd_temp = {"nn_model_class": unrolled_bsca.BSCAUnrolled,
-                                        "num_layers": (num_layers_svdcamsap if not SYNTH_RUNTIME else num_layers_tensmw), "rank": rank_svd,
-                                        "param_nw": True,
+                                      "num_layers": (num_layers_svdcamsap if not SYNTH_RUNTIME else num_layers_tensmw),
+                                      "rank": rank_svd,
+                                      "param_nw": True,
                                       }
                 elif cfg == 11:
                     # modewise sw, tensor
@@ -915,18 +1252,18 @@ def synthetic_comparisons(cvs=None):
                 run_path = os.path.join(RESULTDIR, model_name + DFILEEXT)
 
                 putils.do_training(run_path, train_data, val_data, **train_param, **param_cpd_temp,
-                                   batch_partition_size=({"train": 5, "val": 50} if cfg == 6 else None))  # memory optimization
+                                   batch_partition_size={"train": 5, "val": 25})  # memory optimization
                 putils.eval_model(run_path, param_cpd_temp["nn_model_class"], val_data,
-                                  auc_over_layers=True, training_stats=True, computetime=SYNTH_RUNTIME)
+                                  auc_over_layers=True, training_stats=True, computetime=SYNTH_RUNTIME,
+                                  batch_partition_size=25)
 
 
 def rw_abilene_comparisons(cvs=None):
     if isinstance(CPU_THREAD_LIMIT, int):
         torch.set_num_threads(CPU_THREAD_LIMIT)
 
-    num_weeks_abilene = 24
-
     """DATA GENERATION"""
+    num_weeks_abilene = 24
     combine_weeks = 2
     ano_amplitude = .5
     # ano_amplitude = 1.0
@@ -941,8 +1278,8 @@ def rw_abilene_comparisons(cvs=None):
                           "observation_prob": obs_prob,
                           "anomaly_mixture": "maxmul", "subsampling": 3, "combine_weeks": combine_weeks}
 
-        abilene_routing_path = os.path.join(RW_ABILENE_DIR, "A")
-        abilene_flow_paths = [os.path.join(RW_ABILENE_DIR, "X{:02d}.gz".format(i)) for i in
+        abilene_routing_path = RW_ABILENE_ROUTINGTABLE_PATH
+        abilene_flow_paths = [RW_ABILENE_FLOW_PATH.format(i) for i in
                               range(1, num_weeks_abilene + 1)]
 
         utils.set_rng_seed(0)
@@ -996,7 +1333,7 @@ def rw_abilene_comparisons(cvs=None):
         pwn_opt = "f1ly"
 
         if RW_LAYER_SWEEP:
-            ## CAMSAP
+            ## conference
             for num_lay in range(6, 10):
                 model = unrolled_bsca.BSCAUnrolled
                 model_param = {"nn_model_class": model,
@@ -1011,7 +1348,6 @@ def rw_abilene_comparisons(cvs=None):
                                    force_num_steps_per_epoch=40)
                 putils.eval_model(run_path, model, val_data,
                                   auc_over_layers=True, training_stats=True, roc=(num_lay == 7))
-
 
             # Modewise Tensor
             for num_lay in range(7, 10):
@@ -1136,10 +1472,37 @@ def rw_abilene_comparisons(cvs=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Parses experiment configuration.")
-    parser.add_argument("exp", choices=["synth_abl", "synth_comp", "abil_comp", "class_comp"], action="store", help="Series of experiments. Subexperiments need to be configured inside the file.")
-    parser.add_argument("--cvs", nargs="+", default=None, dest="cvs", type=int, action="store", help="Cross-validation splits to be run. ")
-    parser.add_argument("--parallel", "-p", action="store_true", help="Optional, runs cross-validation experiments in parallel. Only CPU.")
+    parser.add_argument("exp",
+                        choices=["synth_abl", "synth_comp", "abil_comp", "iter_comp", "custom_learn_syn",
+                                 "custom_learn_rw", "custom_iter"],
+                        action="store",
+                        help="Series of experiments. Subexperiments need to be configured inside the file.")
+    parser.add_argument("--cvs", nargs="+", default=None, dest="cvs", type=int, action="store",
+                        help="Cross-validation splits to be run. ")
+    parser.add_argument("--parallel", "-p", action="store_true",
+                        help="Optional, runs cross-validation experiments in parallel. Only CPU.")
+
+    parser.add_argument("--useprecomputed", "-up", action="store_true",
+                        help="Optional, copies the precomputed files over into the data set folder and results folder.")
+
     args = parser.parse_args()
+
+    if args.useprecomputed:
+        import shutil
+        print("Copying precomputed files...")
+        SCENARIODIR_PC = os.path.join("..", "data", "datasets_precomp")
+        RESULTDIR_PC = os.path.join("..", "data", "results_precomp")
+        for fname in os.listdir(SCENARIODIR_PC):
+            copypath = os.path.join(SCENARIODIR, fname)
+            if not os.path.isfile(copypath):
+                shutil.copy(os.path.join(SCENARIODIR_PC, fname), copypath)
+
+        for fname in os.listdir(RESULTDIR_PC):
+            copypath = os.path.join(RESULTDIR, fname)
+            if not os.path.isfile(copypath):
+                shutil.copy(os.path.join(RESULTDIR_PC, fname), copypath)
+
+        print("All files copied.")
 
     if args.exp == "synth_abl":
         experiment = synthetic_adaptfeatures_model_comp
@@ -1147,8 +1510,14 @@ if __name__ == "__main__":
         experiment = synthetic_comparisons
     elif args.exp == "abil_comp":
         experiment = rw_abilene_comparisons
-    elif args.exp == "class_comp":
-        experiment = synthetic_classical_comparison
+    elif args.exp == "iter_comp":
+        experiment = synthetic_iterative_comparison
+    elif args.exp == "custom_learn_syn":
+        experiment = custom_learning_synthetic
+    elif args.exp == "custom_learn_rw":
+        experiment = custom_learning_abilene
+    elif args.exp == "custom_iter":
+        experiment = custom_iterative
     else:
         raise ValueError
 
@@ -1165,5 +1534,3 @@ if __name__ == "__main__":
         #     print("Started experiment with cross-val index {}".format(cv))
     else:
         experiment(cvs=args.cvs)
-
-

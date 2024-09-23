@@ -2,14 +2,18 @@ import os
 import time
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+from skopt import gp_minimize
+from skopt.learning import GaussianProcessRegressor
+from skopt.learning.gaussian_process.kernels import ConstantKernel, Matern
 import utils
 import datagen
 import evalfun
 import reference_algo
 import unrolled_bsca, unrolled_bsca_tensor
 import training_tensor as training
-import matplotlib.pyplot as plt
-# from warnings import deprecated
+from reference_algo_hankel import subspace_tracking_anomography
+
 
 from config import DFILEEXT, SCENARIODIR, EXPORTDIR, RESULTDIR, DEVICE, FP_DTYPE
 
@@ -403,11 +407,13 @@ def do_training(run_path, train_data, valid_data,
     print("Run {} saved.".format(run_path))
 
 
-def eval_model(run_path, nn_model_class, test_data, auc_over_layers=True, training_stats=False, computetime=False, roc=False):
+def eval_model(run_path, nn_model_class, test_data, auc_over_layers=True, training_stats=False, computetime=False,
+               roc=False, fig_out=False, batch_partition_size=None):
     # run_name = training_data_name + "_ly{}_r{}".format(num_layers, rank)
     report = torch.load(run_path, map_location=torch.device("cpu"))
 
     run_name = os.path.splitext(os.path.basename(run_path))[0]
+    print("EVAL:", run_name)
 
     model_dict = report["model_dict"]
     model_kw = report["model_kw"]
@@ -420,19 +426,26 @@ def eval_model(run_path, nn_model_class, test_data, auc_over_layers=True, traini
     model.eval()  # IMPORTANT
     num_layers = model.num_layers
 
-    if auc_over_layers or computetime:
-        if isinstance(test_data, dict):
-            test_data_path = test_data["path"]
-            test_data_name = os.path.splitext(os.path.basename(test_data_path))[0]
-            test_data_set = torch.load(test_data_path)
-            test_data_set = datagen.nw_scenario_subset(test_data_set, test_data["idx"])
-        else:
-            test_data_path = os.path.join(SCENARIODIR, test_data + DFILEEXT)
-            test_data_name = test_data
-            test_data_set = torch.load(test_data_path)
-        test_data_set.to(DEVICE)
+    if isinstance(test_data, dict):
+        test_data_path = test_data["path"]
+        test_data_name = os.path.splitext(os.path.basename(test_data_path))[0]
+        test_data_set = torch.load(test_data_path)
+        test_data_set = datagen.nw_scenario_subset(test_data_set, test_data["idx"])
+    else:
+        test_data_path = os.path.join(SCENARIODIR, test_data + DFILEEXT)
+        test_data_name = test_data
+        test_data_set = torch.load(test_data_path)
+    test_data_size = test_data_set["batch_size"]
+    test_data_set.to(DEVICE)
 
-        export_path_computetime = os.path.join(EXPORTDIR, "{}_ON_{}_time.txt".format(run_name, test_data_name))
+    if batch_partition_size is not None:
+        batch_partition_size = min(test_data_size, batch_partition_size)
+        assert test_data_size % batch_partition_size == 0, "Data set size must be divisible by batch_partition_size"
+
+    export_path_computetime = os.path.join(EXPORTDIR, "{}_ON_{}_time.txt".format(run_name, test_data_name))
+    export_path_auclayers = os.path.join(EXPORTDIR, "{}_ON_{}_auc.txt".format(run_name, test_data_name))
+
+    if auc_over_layers or computetime:
         if not os.path.isfile(export_path_computetime) and computetime:
             with torch.autograd.no_grad():
                 torch.manual_seed(0)
@@ -447,17 +460,30 @@ def eval_model(run_path, nn_model_class, test_data, auc_over_layers=True, traini
         else:
             print("{} already exists".format(export_path_computetime))
 
-        export_path_auclayers = os.path.join(EXPORTDIR, "{}_ON_{}_auc.txt".format(run_name, test_data_name))
         if not os.path.isfile(export_path_auclayers) and auc_over_layers:
+            s = time.time()
             with torch.autograd.no_grad():
                 torch.manual_seed(0)
-                s = time.time()
-                model_out = model(test_data_set)
-                e = time.time()
+                if batch_partition_size is not None:
+                    sidx_list = [list(range(s, s + batch_partition_size)) for s in
+                                 range(0, test_data_size, batch_partition_size)]
+                    auc_model = []
+                    for sidx in sidx_list:
+                        data_partition = datagen.nw_scenario_subset(test_data_set, sidx)
+                        model_out_partition = model(data_partition)
+                        model_out_A_partition = model_out_partition[-1]
+                        auc_model.append(utils.exact_auc(model_out_A_partition.abs(), data_partition["A"]).cpu())
+                    auc_model = torch.stack(auc_model, dim=0)
+                    auc_model = auc_model.mean(dim=0)
+
+                else:
+                    model_out = model(test_data_set)
+                    model_out_A = model_out[-1]
+                    auc_model = utils.exact_auc(model_out_A.abs(), test_data_set["A"]).cpu()
+            e = time.time()
             elapsed = e - s
 
-            model_out_A = model_out[-1]
-            auc_model = utils.exact_auc(model_out_A.abs(), test_data_set["A"]).cpu()
+
             mu = model.mu_val.cpu().numpy()
 
             # if lam.ndim == 2:
@@ -499,38 +525,90 @@ def eval_model(run_path, nn_model_class, test_data, auc_over_layers=True, traini
 
             np.savetxt(export_path_auclayers, export_data_auc, delimiter="\t", header=header)
         elif auc_over_layers:
-            print("{} already exists".format(export_path_auclayers))
+            data = np.loadtxt(export_path_auclayers, delimiter="\t")
+            print(f"Exportfile already exists; Readout of AUC after last layer ({data[-1, 0]}): {data[-1, 1]}")
+            # print("{} already exists".format(export_path_auclayers))
+
+    # if fig_out:
+    #     if not os.path.isfile(export_path2):
+    #         print(f"Cannot generate figure {export_path2} do not exist. Set auc_over_iter to True.")
+    #     else:
+    #         data = np.loadtxt(export_path2, delimiter="\t")
+    #         itidx, obj_vals, auc_vals = data[:, 0], data[:, 1], data[:, 2]
+    #         fig, axs = plt.subplots(2, 1)
+    #         fig.suptitle(f"{result_name} over iterations")
+    #         axs[0].plot(itidx, obj_vals)
+    #         axs[0].set_xlabel("Iteration")
+    #         axs[0].set_ylabel("Objective")
+    #         axs[1].plot(itidx, auc_vals)
+    #         axs[1].set_ylim([0, 1])
+    #         axs[1].set_xlabel("Iteration")
+    #         axs[1].set_ylabel("AUC")
+    #         fig.tight_layout()
+    #
+    #         export_path2_fig = os.path.join(EXPORTDIR, result_name + "_iter" + ".png")
+    #         fig.savefig(export_path2_fig)
 
         # export_path_roc = os.path.join(EXPORTDIR, "{}_ON_{}_roc.txt".format(run_name, test_data_name))
-        export_path_roc_full = os.path.join(EXPORTDIR, "{}_ON_{}_roc.pt".format(run_name, test_data_name))
-        if not os.path.isfile(export_path_roc_full) and roc:
-            with torch.autograd.no_grad():
-                torch.manual_seed(0)
-                s = time.time()
+    export_path_roc_full = os.path.join(EXPORTDIR, "{}_ON_{}_roc.pt".format(run_name, test_data_name))
+    if not os.path.isfile(export_path_roc_full) and roc:
+        with torch.autograd.no_grad():
+            torch.manual_seed(0)
+            if batch_partition_size is not None:
+                sidx_list = [list(range(s, s + batch_partition_size)) for s in
+                             range(0, test_data_size, batch_partition_size)]
+                model_out_A = []
+                for sidx in sidx_list:
+                    data_partition = datagen.nw_scenario_subset(test_data_set, sidx)
+                    model_out_partition = model(data_partition)
+                    model_out_A_partition = model_out_partition[-1][-1]  # last layer
+                    model_out_A.append(model_out_A_partition)
+
+                model_out_A = torch.cat(model_out_A, dim=0)
+            else:
                 model_out = model(test_data_set)
-                e = time.time()
-            model_out_A = model_out[-1][-1]  # last layer
+                model_out_A = model_out[-1][-1]  # last layer
 
-            # roc_curve = evalfun.roc_curve(model_out_A.abs().cpu(), test_data_set["A"].cpu(), num_samples=50)
-            # header = "pfa_roc\tpd_roc"
-            # export_data_roc = np.stack([roc_curve["pfa_roc"].numpy(), roc_curve["pd_roc"].numpy()], axis=-1)
-            # np.savetxt(export_path_roc, export_data_roc, delimiter="\t", header=header)
+        # roc_curve = evalfun.roc_curve(model_out_A.abs().cpu(), test_data_set["A"].cpu(), num_samples=50)
+        # header = "pfa_roc\tpd_roc"
+        # export_data_roc = np.stack([roc_curve["pfa_roc"].numpy(), roc_curve["pd_roc"].numpy()], axis=-1)
+        # np.savetxt(export_path_roc, export_data_roc, delimiter="\t", header=header)
 
-            roc_curve = evalfun.roc_curve(model_out_A.abs().cpu(), test_data_set["A"].cpu(), num_samples=500, batch_mean=False)
-            torch.save(roc_curve, export_path_roc_full)
-        elif roc:
-            print("{} already exists".format(export_path_roc_full))
+        roc_curve = evalfun.roc_curve(model_out_A.abs().cpu(), test_data_set["A"].cpu(), num_samples=500, batch_mean=False)
+        torch.save(roc_curve, export_path_roc_full)
 
+        # export_path_roc_full_txt = os.path.join(EXPORTDIR, "{}_ON_{}_roc.pt".format(run_name, test_data_name))
+        # header = "pfa_roc\tpd_roc"
+        # export_data_roc = np.stack([roc_curve["pfa_roc"].numpy(), roc_curve["pd_roc"].numpy()], axis=-1)
+        # np.savetxt(export_path_roc_full_txt, export_data_roc, delimiter="\t", header=header)
+    elif roc:
+        print("{} already exists".format(export_path_roc_full))
+
+    if fig_out:
+        if not os.path.isfile(export_path_roc_full):
+            print(f"Cannot generate figure because {export_path_roc_full} does not exist. Set roc to True.")
+        else:
+            roc_curve = torch.load(export_path_roc_full)
+            pd_roc, pfa_roc = roc_curve["pd_roc"].mean(dim=-1), roc_curve["pfa_roc"].mean(dim=-1)
+            fig, axs = plt.subplots(1, 1, figsize=(12, 9), dpi=120)
+            fig.suptitle(f"{run_name} ROC (sample points averaged over realizations)")
+            axs.plot(pfa_roc, pd_roc)
+            axs.set_xlabel("Prob. of False Alarms")
+            axs.set_ylabel("Prob. of Detection")
+            fig.tight_layout()
+
+            export_path_roc_full_fig = os.path.join(EXPORTDIR, "{}_ON_{}_roc.png".format(run_name, test_data_name))
+            fig.savefig(export_path_roc_full_fig)
+
+    export_path_tsteps = os.path.join(EXPORTDIR, "{}_tloss.txt".format(run_name))
+    export_path_tepochs = os.path.join(EXPORTDIR, "{}_tepochs.txt".format(run_name))
     if training_stats:
-        export_path_tsteps = os.path.join(EXPORTDIR, "{}_tloss.txt".format(run_name))
         if not os.path.isfile(export_path_tsteps):
             training_loss = report["training_loss"].numpy()
             export_tsteps = np.stack([np.arange(len(training_loss)), training_loss], axis=-1)
             np.savetxt(export_path_tsteps, export_tsteps, delimiter="\t", header="Layer\ttraining_data_loss")
         else:
             pass
-
-        export_path_tepochs = os.path.join(EXPORTDIR, "{}_tepochs.txt".format(run_name))
         if not os.path.isfile(export_path_tepochs):
             val_loss = report["test_loss"].numpy()
             anomaly_l2 = report["test_anomaly_l2"].numpy()
@@ -575,6 +653,29 @@ def eval_model(run_path, nn_model_class, test_data, auc_over_layers=True, traini
         else:
             pass
 
+    if fig_out:
+        if not (os.path.isfile(export_path_tsteps) and os.path.isfile(export_path_tepochs)):
+            print(f"Cannot generate figure because {export_path_tsteps} and {export_path_tepochs} does not exist. "
+                  f"Set auc_over_iter to True.")
+        else:
+            data_tsteps = np.loadtxt(export_path_tsteps, delimiter="\t")
+            data_tepochs = np.loadtxt(export_path_tepochs, delimiter="\t")
+            tsteps, tloss = data_tsteps[:, 0], data_tsteps[:, 1]
+            tepochs, valloss = data_tepochs[:, 0], data_tepochs[:, 1]
+            fig, axs = plt.subplots(2, 1, figsize=(12, 9), dpi=120)
+            fig.suptitle(f"{run_name} over iterations")
+            axs[0].plot(tsteps, tloss)
+            axs[0].set_xlabel("Training Step")
+            axs[0].set_ylabel("Training Loss")
+            axs[1].plot(tepochs, valloss)
+            # axs[1].set_ylim([0, 1])
+            axs[1].set_xlabel("Training Epoch")
+            axs[1].set_ylabel("Validation Loss")
+            fig.tight_layout()
+
+            export_path2_fig = os.path.join(EXPORTDIR, f"{run_name}_training.txt" + ".png")
+            fig.savefig(export_path2_fig)
+
 
 def _export_for_heatmap(x, y, z):
     size = len(x) * len(y)
@@ -585,12 +686,6 @@ def _export_for_heatmap(x, y, z):
             filemat.append(np.array([x[i], y[j], z[i, j]]))
     filemat = np.stack(filemat, axis=0)
     return filemat
-
-
-from reference_algo_hankel import subspace_tracking_anomography
-from skopt import gp_minimize
-from skopt.learning import GaussianProcessRegressor
-from skopt.learning.gaussian_process.kernels import ConstantKernel, Matern
 
 
 def _kasai_refalg_splitbatch(batch_data_dict, rank, lam, mu_r, mu_h, mu_s, win_len, partition_size=1):
@@ -740,7 +835,7 @@ def _bayes_opt_kasai_refalg(data_dict, rank, window_length=None, pinit=None, psc
 
 
 def eval_kasai_refalg(training_data_path, val_data_path, result_name, rank, window_length=None, batch_partition_size=1,
-                      search_space=None, num_fun_calls=100, roc=False):
+                      search_space=None, num_fun_calls=100, roc=False, fig_out=False):
     training_data = utils.retrieve_data(training_data_path)
     val_data = utils.retrieve_data(val_data_path)
 
@@ -810,6 +905,51 @@ def eval_kasai_refalg(training_data_path, val_data_path, result_name, rank, wind
     elif roc:
         print("{} already exists".format(export_path_roc_full))
 
+    if fig_out:
+        if not os.path.isfile(export_path_roc_full):
+            print(f"Cannot generate figure because {export_path_roc_full} does not exist. Set roc to True.")
+        else:
+            roc_curve = torch.load(export_path_roc_full)
+            pd_roc, pfa_roc = roc_curve["pd_roc"].mean(dim=-1), roc_curve["pfa_roc"].mean(dim=-1)
+            fig, axs = plt.subplots(1, 1, figsize=(12, 9), dpi=120)
+            fig.suptitle(f"{result_name} ROC (sample points averaged over realizations)")
+            axs.plot(pfa_roc, pd_roc)
+            axs.set_xlabel("Prob. of False Alarms")
+            axs.set_ylabel("Prob. of Detection")
+            fig.tight_layout()
+
+            export_path_roc_full_fig = os.path.join(EXPORTDIR, result_name + "_roc.png")
+            fig.savefig(export_path_roc_full_fig)
+
+
+def _classical_alg_splitbatch(data_dict, rank, partition_size=10, return_im_steps=False, **kwargs):
+
+    assert data_dict["batch_size"] % partition_size == 0, 'Data set size must be divisible by partion_size'
+    sidx_list = [list(range(s, s + partition_size)) for s in range(0, data_dict["batch_size"], partition_size)]
+    return_collect = []
+    for sidx in sidx_list:
+        data_partition = datagen.nw_scenario_subset(data_dict, sidx)
+        return_collect.append(_classical_alg(data_partition, rank, return_im_steps=return_im_steps, **kwargs))
+
+    A, elapsed, obj = [], [], []
+    for r in return_collect:
+        A.append(r[0])
+        elapsed.append(r[1])
+        if len(r) == 3:
+            obj.append(r[2])
+
+    if return_im_steps:
+        A = torch.cat(A, dim=1)  # 0th dimension is iteration
+    else:
+        A = torch.cat(A, dim=0)
+
+    elapsed = sum(elapsed)
+    if len(obj) == 0:
+        return A, elapsed
+    else:
+        obj = torch.stack(obj, dim=0).mean(dim=0)  # since batchmean always taken
+        return A, elapsed, obj
+
 
 def _classical_alg(data_dict, rank, num_iter=None, lam=None, mu=None, nu=None, init="randsc", alg="bsca", return_im_steps=False,
                    return_obj_val=False):
@@ -859,7 +999,7 @@ def _classical_alg(data_dict, rank, num_iter=None, lam=None, mu=None, nu=None, i
         return A, elapsed
 
 
-def _bayes_classical_alg(data_dict, rank, num_fun_calls=250, alg="bsca", init="randsc"):
+def _bayes_classical_alg(data_dict, rank, num_fun_calls=250, alg="bsca", init="randsc", partition_size=10):
     UNCERTAINTY = 1e-4  # estimated variance
 
     # win_len = window_length
@@ -901,9 +1041,8 @@ def _bayes_classical_alg(data_dict, rank, num_fun_calls=250, alg="bsca", init="r
         print(
             "Calling method using parameters num_layers={:.3f}, lam={:.3f}, mu={:.3f}, nu={:.3f}".format(num_iter, lam,
                                                                                                          mu, nu))
-
-        A, _ = _classical_alg(data_dict, rank, num_iter, lam, mu, nu, alg=alg, return_im_steps=False)
-
+        A, _ = _classical_alg_splitbatch(data_dict, rank, num_iter=num_iter, lam=lam, mu=mu, nu=nu, alg=alg, return_im_steps=False,
+                                         partition_size=partition_size)
         nauc = -evalfun.exact_auc(A, data_dict["A"])
         print("AUC={}".format(-nauc))
         return nauc.cpu().item()
@@ -953,7 +1092,8 @@ def _bayes_classical_alg(data_dict, rank, num_fun_calls=250, alg="bsca", init="r
     return auc_opt, opt_param, out_dict
 
 
-def eval_classical_alg(training_data_path, val_data_path, result_name, rank, num_fun_calls=100, alg="bsca", auc_over_iter=True, roc=False):
+def eval_classical_alg(training_data_path, val_data_path, result_name, rank, num_fun_calls=100, alg="bsca",
+                       auc_over_iter=True, roc=False, fig_out=False, partition_size=10):
     training_data = utils.retrieve_data(training_data_path)
     val_data = utils.retrieve_data(val_data_path)
 
@@ -971,7 +1111,8 @@ def eval_classical_alg(training_data_path, val_data_path, result_name, rank, num
         auc_train, opt_param_train, opt_dict = _bayes_classical_alg(training_data,
                                                                     rank,
                                                                     num_fun_calls=num_fun_calls,
-                                                                    alg=alg)
+                                                                    alg=alg,
+                                                                    partition_size=partition_size)
 
         torch.save({"opt_dict": opt_dict, "auc_train": auc_train, "opt_param_train": opt_param_train}, opt_result_path)
     else:
@@ -990,7 +1131,8 @@ def eval_classical_alg(training_data_path, val_data_path, result_name, rank, num
         #     print(
         #         "Achieved {:.3f} with num_iter={:.3f}, lam={:.3f}, mu={:.3f}".format(auc, num_iter, lam, mu))
         
-        A, elapsed = _classical_alg(val_data, rank, **opt_param_train, return_im_steps=False, alg=alg)
+        A, elapsed = _classical_alg_splitbatch(val_data, rank, **opt_param_train, return_im_steps=False, alg=alg,
+                                                                    partition_size=partition_size)
         auc_val = evalfun.exact_auc(A, val_data["A"])
         auc_val = auc_val.cpu()
 
@@ -1009,8 +1151,9 @@ def eval_classical_alg(training_data_path, val_data_path, result_name, rank, num
     if auc_over_iter:
         if not os.path.isfile(export_path2):
             """AUC and objective over iterations"""
-            opt_param_train["num_iter"] = 1000
-            A, _, obj_vals = _classical_alg(val_data, rank, **opt_param_train, return_im_steps=True, return_obj_val=True, alg=alg)
+            opt_param_train["num_iter"] = 500
+            A, _, obj_vals = _classical_alg_splitbatch(val_data, rank, **opt_param_train, return_im_steps=True,
+                                                       return_obj_val=True, alg=alg, partition_size=partition_size)
             obj_vals = obj_vals.cpu()
             auc_vals = evalfun.exact_auc(A, val_data["A"])
             auc_vals = auc_vals.cpu()
@@ -1028,10 +1171,31 @@ def eval_classical_alg(training_data_path, val_data_path, result_name, rank, num
         else:
             print("{} already exists.".format(export_path2))
 
+    if fig_out:
+        if not os.path.isfile(export_path2):
+            print(f"Cannot generate figure because {export_path2} does not exist. Set auc_over_iter to True.")
+        else:
+            data = np.loadtxt(export_path2, delimiter="\t")
+            itidx, obj_vals, auc_vals = data[:, 0], data[:, 1], data[:, 2]
+            fig, axs = plt.subplots(2, 1, figsize=(12, 9), dpi=120)
+            fig.suptitle(f"{result_name} over iterations")
+            axs[0].plot(itidx, obj_vals)
+            axs[0].set_xlabel("Iteration")
+            axs[0].set_ylabel("Objective")
+            axs[1].plot(itidx, auc_vals)
+            axs[1].set_ylim([0, 1])
+            axs[1].set_xlabel("Iteration")
+            axs[1].set_ylabel("AUC")
+            fig.tight_layout()
+
+            export_path2_fig = os.path.join(EXPORTDIR, result_name + "_iter" + ".png")
+            fig.savefig(export_path2_fig)
+
     # export_path_roc = os.path.join(EXPORTDIR, result_name + "_roc.txt")
     export_path_roc_full = os.path.join(EXPORTDIR, result_name + "_roc.pt")
     if not os.path.isfile(export_path_roc_full) and roc:
-        A, _ = _classical_alg(val_data, rank, **opt_param_train, return_im_steps=False, return_obj_val=False, alg=alg)
+        A, _ = _classical_alg_splitbatch(val_data, rank, **opt_param_train, return_im_steps=False, return_obj_val=False,
+                                         alg=alg, partition_size=partition_size)
         # roc_curve = evalfun.roc_curve(A.abs().cpu(), val_data["A"].cpu(), num_samples=50)
         # header = "pfa_roc\tpd_roc"
         # export_data_roc = np.stack([roc_curve["pfa_roc"].numpy(), roc_curve["pd_roc"].numpy()], axis=-1)
@@ -1042,3 +1206,25 @@ def eval_classical_alg(training_data_path, val_data_path, result_name, rank, num
         torch.save(roc_curve, export_path_roc_full)
     elif roc:
         print("{} already exists".format(export_path_roc_full))
+
+    if fig_out:
+        if not os.path.isfile(export_path_roc_full):
+            print(f"Cannot generate figure because {export_path_roc_full} does not exist. Set roc to True.")
+        else:
+            roc_curve = torch.load(export_path_roc_full)
+            pd_roc, pfa_roc = roc_curve["pd_roc"].mean(dim=-1), roc_curve["pfa_roc"].mean(dim=-1)
+            fig, axs = plt.subplots(1, 1, figsize=(12, 9), dpi=120)
+            fig.suptitle(f"{result_name} ROC (sample points averaged over realizations)")
+            axs.plot(pfa_roc, pd_roc)
+            axs.set_xlabel("Prob. of False Alarms")
+            axs.set_ylabel("Prob. of Detection")
+            fig.tight_layout()
+
+            export_path_roc_full_fig = os.path.join(EXPORTDIR, result_name + "_roc.png")
+            fig.savefig(export_path_roc_full_fig)
+
+
+def get_lam_mu_grid(min, max, resolution):
+    lam_log_space = torch.linspace(min, max, resolution)
+    mu_log_space = torch.linspace(min, max, resolution)
+    return lam_log_space, mu_log_space
